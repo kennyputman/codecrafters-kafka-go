@@ -7,7 +7,7 @@ import (
 	"os"
 )
 
-type Message struct {
+type Request struct {
 	Size   uint32
 	Header Header
 }
@@ -18,13 +18,38 @@ type Header struct {
 	CorrelationId     uint32
 }
 
-func parseRequest(msg []byte) (Message, error) {
+type Response struct {
+	Size          uint32
+	CorrelationId uint32
+	ErrorCode     uint16
+}
+
+func (r *Response) encode() []byte {
+	res := make([]byte, 12)
+	binary.BigEndian.PutUint32(res[0:4], r.Size)
+	binary.BigEndian.PutUint32(res[4:8], r.CorrelationId)
+	binary.BigEndian.PutUint16(res[8:10], r.ErrorCode)
+
+	return res
+}
+
+func responseResolver(req Request) Response {
+
+	res := Response{
+		Size:          req.Size,
+		CorrelationId: req.Header.CorrelationId,
+		ErrorCode:     uint16(35)}
+
+	return res
+}
+
+func parseRequest(msg []byte) (Request, error) {
 	msgSize := binary.BigEndian.Uint32(msg[:4])
 	reqApiKey := binary.BigEndian.Uint16(msg[4:6])
 	reqApiVersion := binary.BigEndian.Uint16(msg[6:8])
 	correlationId := binary.BigEndian.Uint32(msg[8:12])
 
-	res := Message{
+	res := Request{
 		Size: msgSize,
 		Header: Header{
 			RequestApiKey:     reqApiKey,
@@ -33,21 +58,6 @@ func parseRequest(msg []byte) (Message, error) {
 		},
 	}
 	return res, nil
-}
-
-func responeResolver(msg []byte) []byte {
-
-	req, err := parseRequest(msg)
-	if err != nil {
-		fmt.Printf("Error, %e", err)
-	}
-
-	response := make([]byte, 8)
-
-	binary.BigEndian.PutUint32(response[0:4], req.Size)
-	binary.BigEndian.PutUint32(response[4:8], req.Header.CorrelationId)
-
-	return response
 }
 
 func handleConnection(conn net.Conn) {
@@ -62,8 +72,12 @@ func handleConnection(conn net.Conn) {
 		msg := make([]byte, n)
 		msg = buff[:n]
 
-		resp := responeResolver(msg)
-		conn.Write(resp)
+		req, err := parseRequest(msg)
+		if err != nil {
+			fmt.Printf("Error: %e", err)
+		}
+		resp := responseResolver(req)
+		conn.Write(resp.encode())
 	}
 }
 
