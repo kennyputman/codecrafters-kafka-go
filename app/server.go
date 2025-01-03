@@ -35,12 +35,6 @@ type ResponseWriter interface {
 	encode() ([]byte, error)
 }
 
-type Response struct {
-	Size          int32
-	CorrelationId int32
-	ErrorCode     int16
-}
-
 // message_size: int32
 // Header
 //
@@ -49,37 +43,29 @@ type Response struct {
 // Body
 //
 //	error_code: int16
-//	api_keys: tag_buffer
+//	api_keys:
 //		api_key: int16
 //		min_verison: int16
 //		max_version: int16
+//		tag_buffer: int8
 //	throttle_time_ms: int32
+//	tag_buffer: int8
 type ApiKey struct {
 	ApiKey     int16
 	MinVersion int16
 	MaxVersion int16
 }
 type ApiVersionRes struct {
-	Size           int32
 	CorrelationId  int32
 	ErrorCode      int16
 	ApiKey         []ApiKey
 	ThrottleTimeMs int32
 }
 
-func (r *Response) encode() []byte {
-	res := make([]byte, 12)
-	binary.BigEndian.PutUint32(res[0:4], 12)
-	binary.BigEndian.PutUint32(res[4:8], uint32(r.CorrelationId))
-	binary.BigEndian.PutUint16(res[8:10], uint16(r.ErrorCode))
-
-	return res
-}
-
 func encodeApiKeys(buffer *bytes.Buffer, res *ApiVersionRes) error {
 
 	// write the length of the api keys array
-	if err := binary.Write(buffer, binary.BigEndian, len(res.ApiKey)); err != nil {
+	if err := binary.Write(buffer, binary.BigEndian, uint8(len(res.ApiKey)+1)); err != nil {
 		return err
 	}
 	// write api keys array
@@ -93,16 +79,13 @@ func encodeApiKeys(buffer *bytes.Buffer, res *ApiVersionRes) error {
 		if err := binary.Write(buffer, binary.BigEndian, key.MaxVersion); err != nil {
 			return err
 		}
+
 	}
 	return nil
 }
 
 func (r *ApiVersionRes) encode() ([]byte, error) {
 	buffer := new(bytes.Buffer)
-
-	if err := binary.Write(buffer, binary.BigEndian, r.Size); err != nil {
-		return nil, err
-	}
 
 	if err := binary.Write(buffer, binary.BigEndian, r.CorrelationId); err != nil {
 		return nil, err
@@ -113,7 +96,17 @@ func (r *ApiVersionRes) encode() ([]byte, error) {
 
 	encodeApiKeys(buffer, r)
 
+	// TODO: hack to write tagged field to 0 : update to tagged fields
+	if err := binary.Write(buffer, binary.BigEndian, uint8(0)); err != nil {
+		return nil, err
+	}
+
 	if err := binary.Write(buffer, binary.BigEndian, r.ThrottleTimeMs); err != nil {
+		return nil, err
+	}
+
+	// TODO: hack to write tagged field to 0 : update to tagged fields
+	if err := binary.Write(buffer, binary.BigEndian, uint8(0)); err != nil {
 		return nil, err
 	}
 
@@ -122,17 +115,16 @@ func (r *ApiVersionRes) encode() ([]byte, error) {
 
 func handleApiVersions(req Request) ResponseWriter {
 	res := &ApiVersionRes{
-		Size:          24,
 		CorrelationId: int32(req.Header.CorrelationId),
 		ErrorCode:     0,
 		ApiKey: []ApiKey{
 			{
 				ApiKey:     18,
+				MinVersion: 3,
 				MaxVersion: 4,
-				MinVersion: 1,
 			},
 		},
-		ThrottleTimeMs: 30,
+		ThrottleTimeMs: 0,
 	}
 
 	if req.Header.RequestApiVersion < 0 || req.Header.RequestApiVersion > 4 {
@@ -195,6 +187,11 @@ func handleConnection(conn net.Conn) {
 		if err != nil {
 			fmt.Printf("Error: %e", err)
 		}
+
+		fmt.Println("len of slice: ", len(res))
+		size := make([]byte, 4)
+		binary.BigEndian.PutUint32(size[:4], uint32(len(res)))
+		conn.Write(size)
 		conn.Write(res)
 	}
 }
