@@ -1,10 +1,23 @@
 package main
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"net"
 	"os"
+)
+
+type ApiKeyCode int
+
+const (
+	ApiVersions ApiKeyCode = 18
+)
+
+type ErrorCode int
+
+const (
+	UnsupportedVersion ErrorCode = 35
 )
 
 type Request struct {
@@ -18,28 +31,128 @@ type Header struct {
 	CorrelationId     uint32
 }
 
+type ResponseWriter interface {
+	encode() ([]byte, error)
+}
+
 type Response struct {
-	Size          uint32
-	CorrelationId uint32
-	ErrorCode     uint16
+	Size          int32
+	CorrelationId int32
+	ErrorCode     int16
+}
+
+// message_size: int32
+// Header
+//
+//	correleation_id: int32
+//
+// Body
+//
+//	error_code: int16
+//	api_keys: tag_buffer
+//		api_key: int16
+//		min_verison: int16
+//		max_version: int16
+//	throttle_time_ms: int32
+type ApiKey struct {
+	ApiKey     int16
+	MinVersion int16
+	MaxVersion int16
+}
+type ApiVersionRes struct {
+	Size           int32
+	CorrelationId  int32
+	ErrorCode      int16
+	ApiKey         []ApiKey
+	ThrottleTimeMs int32
 }
 
 func (r *Response) encode() []byte {
 	res := make([]byte, 12)
-	binary.BigEndian.PutUint32(res[0:4], r.Size)
-	binary.BigEndian.PutUint32(res[4:8], r.CorrelationId)
-	binary.BigEndian.PutUint16(res[8:10], r.ErrorCode)
+	binary.BigEndian.PutUint32(res[0:4], 12)
+	binary.BigEndian.PutUint32(res[4:8], uint32(r.CorrelationId))
+	binary.BigEndian.PutUint16(res[8:10], uint16(r.ErrorCode))
 
 	return res
 }
 
-func responseResolver(req Request) Response {
+func encodeApiKeys(buffer *bytes.Buffer, res *ApiVersionRes) error {
 
-	res := Response{
-		Size:          req.Size,
-		CorrelationId: req.Header.CorrelationId,
-		ErrorCode:     uint16(35)}
+	// write the length of the api keys array
+	if err := binary.Write(buffer, binary.BigEndian, len(res.ApiKey)); err != nil {
+		return err
+	}
+	// write api keys array
+	for _, key := range res.ApiKey {
+		if err := binary.Write(buffer, binary.BigEndian, key.ApiKey); err != nil {
+			return err
+		}
+		if err := binary.Write(buffer, binary.BigEndian, key.MinVersion); err != nil {
+			return err
+		}
+		if err := binary.Write(buffer, binary.BigEndian, key.MaxVersion); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
+func (r *ApiVersionRes) encode() ([]byte, error) {
+	buffer := new(bytes.Buffer)
+
+	if err := binary.Write(buffer, binary.BigEndian, r.Size); err != nil {
+		return nil, err
+	}
+
+	if err := binary.Write(buffer, binary.BigEndian, r.CorrelationId); err != nil {
+		return nil, err
+	}
+	if err := binary.Write(buffer, binary.BigEndian, r.ErrorCode); err != nil {
+		return nil, err
+	}
+
+	encodeApiKeys(buffer, r)
+
+	if err := binary.Write(buffer, binary.BigEndian, r.ThrottleTimeMs); err != nil {
+		return nil, err
+	}
+
+	return buffer.Bytes(), nil
+}
+
+func handleApiVersions(req Request) ResponseWriter {
+	res := &ApiVersionRes{
+		Size:          24,
+		CorrelationId: int32(req.Header.CorrelationId),
+		ErrorCode:     0,
+		ApiKey: []ApiKey{
+			{
+				ApiKey:     18,
+				MaxVersion: 4,
+				MinVersion: 1,
+			},
+		},
+		ThrottleTimeMs: 30,
+	}
+
+	if req.Header.RequestApiVersion < 0 || req.Header.RequestApiVersion > 4 {
+		res.ErrorCode = int16(UnsupportedVersion)
+	}
+
+	return res
+}
+
+func responseHandler(req Request) ResponseWriter {
+
+	api := req.Header.RequestApiKey
+	var res ResponseWriter
+
+	switch api {
+	case uint16(ApiVersions):
+		res = handleApiVersions(req)
+	default:
+		fmt.Println("Error: unsupported API")
+	}
 	return res
 }
 
@@ -76,13 +189,17 @@ func handleConnection(conn net.Conn) {
 		if err != nil {
 			fmt.Printf("Error: %e", err)
 		}
-		resp := responseResolver(req)
-		conn.Write(resp.encode())
+		resp := responseHandler(req)
+		res, err := resp.encode()
+
+		if err != nil {
+			fmt.Printf("Error: %e", err)
+		}
+		conn.Write(res)
 	}
 }
 
 func main() {
-	// You can use print statements ks follows for debugging, they'll be visible when running tests.
 	fmt.Println("Logs from your program will appear here!")
 
 	l, err := net.Listen("tcp", "0.0.0.0:9092")
